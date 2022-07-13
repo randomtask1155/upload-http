@@ -3,6 +3,7 @@ package main_test
 import (
 	"bytes"
 	"io"
+	"io/ioutil"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -47,7 +48,7 @@ var _ = Describe("API Handlers", func() {
 	BeforeEach(func() {
 
 		InputDir = "/tmp/lv-test-input"
-		BinDir = "./bin"
+		BinDir = "./"
 		LokiAddress = "127.0.0.1:3100"
 		IngestCmd = path.Join(BinDir, "ingest")
 
@@ -94,19 +95,17 @@ var _ = Describe("API Handlers", func() {
 				_, err := os.Stat(path.Join(InputDir, dstFileName))
 				Expect(err).ShouldNot(HaveOccurred())
 			})
-
-			It("file cache has filename", func() {
-				Expect(len(FileCache)).To(Equal(1))
-				Expect(FileCache[0]).To(Equal(dstFileName))
-			})
 		})
 
 		Context("when files are ingested", func() {
 			It("emptycache func deletes filecache", func() {
-				FileCache = append(FileCache, dstFileName)
-				Expect(FileCache[0]).To(Equal(dstFileName))
-				EmptyCache()
-				Expect(len(FileCache)).To(Equal(0))
+				files, err := ioutil.ReadDir(InputDir)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(len(files)).ToNot(Equal(0))
+				EmptyInputFolder(InputDir)
+				files, err = ioutil.ReadDir(InputDir)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(len(files)).To(Equal(0))
 			})
 		})
 	})

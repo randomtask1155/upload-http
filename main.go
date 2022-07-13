@@ -10,15 +10,17 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"time"
 )
 
 var (
 	port        = "3200"
 	InputDir    = "./ingester/input"
-	BinDir      = "./bin"
+	BinDir      = "./"
 	LokiAddress = "127.0.0.1:3100"
-	IngestCmd   = path.Join(BinDir, "ingest")
-	FileCache   []string
+	IngestCmd   = path.Join(BinDir, "bin/ingest")
+	IngestLock  chan struct{}
+	Version     string
 )
 
 type IngestRequest struct {
@@ -46,19 +48,38 @@ func init() {
 		LokiAddress = la
 	}
 
-	FileCache = make([]string, 0)
+	IngestLock = make(chan struct{}, 1)
+
+	if err := os.Chdir(BinDir); err != nil {
+		panic(err)
+	}
 }
 
-func EmptyCache() {
-	for i := range FileCache {
-		log.Printf("Deleteing file %s", path.Join(InputDir, FileCache[i]))
-		out, err := exec.Command("rm", path.Join(InputDir, FileCache[i])).CombinedOutput()
+func EmptyInputFolder(d string) {
+	files, err := ioutil.ReadDir(d)
+	if err != nil {
+		log.Fatalf("deleting data in input dir failed\n%s", err)
+	}
+	for i := range files {
+		filename := path.Join(d, files[i].Name())
+		log.Printf("Deleteing %s", filename)
+		out, err := exec.Command("rm", "-rf", filename).CombinedOutput()
 		if err != nil {
 			log.Fatalf("deleting data in input dir failed\n%s\n%s\n", out, err)
 			return
 		}
 	}
-	FileCache = make([]string, 0)
+}
+
+func LaunchIngester(req IngestRequest, ch chan struct{}, d string) {
+	out, err := exec.Command(IngestCmd, LokiAddress, req.Filter).CombinedOutput()
+	if err != nil {
+		log.Printf("running ingest failed\n%s\n%s\n", out, err)
+		return
+	}
+	log.Println(fmt.Sprintf("%s", out))
+	EmptyInputFolder(d)
+	<-ch
 }
 
 func UploadHandler(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +110,6 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	FileCache = append(FileCache, fh.Filename)
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -113,14 +133,31 @@ func ingestHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := exec.Command(IngestCmd, LokiAddress, req.Filter).CombinedOutput()
-	if err != nil {
-		log.Printf("running ingest failed\n%s\n%s\n", out, err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// make sure only one ingest is running at any given time
+	select {
+	case IngestLock <- struct{}{}:
+		go LaunchIngester(req, IngestLock, InputDir)
+		output := `
+#################################################
+ingest is runnig and you can check for errors on 
+the grafana-loki vm by running the following 
+sequence
+#################################################
+
+grafana-loki/a5170227-c641-4be6-9afb-78289ad29eeb:/var/vcap/store# docker ps -a | egrep ingester
+1838bb55d8cf   ingester_log-processor   "/log-processor.sh /…"   22 minutes ago      Exited (0) 21 minutes ago                              ingester_log-processor_run_ade386723116
+
+
+grafana-loki/a5170227-c641-4be6-9afb-78289ad29eeb:/var/vcap/store# docker logs 1838bb55d8cf | tail
+
+
+`
+		w.Write([]byte(output))
+	case <-time.After(time.Second):
+		http.Error(w, "ingest is already running", http.StatusTooManyRequests)
 		return
 	}
-	log.Println(out)
-	EmptyCache()
+
 }
 
 func rootHandler(w http.ResponseWriter, r *http.Request) {
@@ -131,12 +168,17 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 </header>
 <body>
 
-uploading files:
-curl -X PUT -H "Content-Type:multipart/form-data" http://ipaddress:3200/upload -F "file=log-file.tgz"
+<p>Version ` + Version + `</p>
+<p>
+uploading files:<br>
+curl -X PUT -H "Content-Type:multipart/form-data" http://ipaddress:3200/upload -F "file=@log-file.tgz"
 
-ingest uploaded files:
-curl -X POST -H "Content-Type:application/json" http://ipaddress:3200/ingest -d '{ filter: "/gorouter/access.*|/gorouter/gorouter.stdout.*|/bosh-dns/bosh_dns.stdout.*"}'
+<br><br>
 
+ingest uploaded files:<br>
+curl -X POST -H "Content-Type:application/json" http://ipaddress:3200/ingest -d '{ "filter": "/gorouter/access.*|/gorouter/gorouter.stdout.*|/bosh-dns/bosh_dns.stdout.*"}'
+<br>
+</p>
 </body>
 </html>
 `
