@@ -19,12 +19,20 @@ var (
 	BinDir      = "./"
 	LokiAddress = "127.0.0.1:3100"
 	IngestCmd   = path.Join(BinDir, "bin/ingest")
+	GoSafelyCmd = "./gosafely"
 	IngestLock  chan struct{}
 	Version     string
 )
 
 type IngestRequest struct {
 	Filter string `json:"filter"`
+}
+
+type SendSafelyRequest struct {
+	URL    string `json:"url"`
+	Key    string `json:"key"`
+	Secret string `json:"secret"`
+	API    string `json:"api"`
 }
 
 func init() {
@@ -39,8 +47,13 @@ func init() {
 	}
 
 	bd := os.Getenv("BIN_DIR")
-	if id != "" {
+	if bd != "" {
 		BinDir = bd
+	}
+
+	gs := os.Getenv("GO_SAFELY")
+	if gs != "" {
+		GoSafelyCmd = gs
 	}
 
 	la := os.Getenv("LOKI_ADDRESS")
@@ -82,6 +95,23 @@ func LaunchIngester(req IngestRequest, ch chan struct{}, d string) {
 	<-ch
 }
 
+func LaunchSendSafely(req SendSafelyRequest, safeCmd, dst string) ([]byte, error) {
+	//echo -ne '\r\n' | ./gosafely download -u
+	cmd := exec.Command("bash", "-c", fmt.Sprintf("echo -ne '\r\n' | %s download -u '%s'", safeCmd, req.URL))
+	cmd.Env = []string{
+		"SS_API_URL=" + req.API,
+		"SS_API_KEY_ID=" + req.Key,
+		"SS_API_KEY_SECRET=" + req.Secret,
+	}
+	cmd.Dir = dst
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return out, fmt.Errorf("running gosafely failed\n%s\n%s", out, err)
+	}
+	log.Println(fmt.Sprintf("%s", out))
+	return out, nil
+}
+
 func UploadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "PUT" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -111,6 +141,33 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
+}
+
+func SemdSafelyHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	req := SendSafelyRequest{}
+	if err := json.Unmarshal(body, &req); err != nil {
+		log.Printf("failed u unmarshal request body: %s\n", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	out, err := LaunchSendSafely(req, GoSafelyCmd, InputDir)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to run gosafely: \n%s\n%s", out, err), http.StatusInternalServerError)
+		return
+	}
+	w.Write(out)
 }
 
 func ingestHandler(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +245,7 @@ curl -X POST -H "Content-Type:application/json" http://ipaddress:3200/ingest -d 
 func StartHTTPServer() error {
 	http.HandleFunc("/", rootHandler)
 	http.HandleFunc("/upload", UploadHandler)
+	http.HandleFunc("/sendsafely", SemdSafelyHandler)
 	http.HandleFunc("/ingest", ingestHandler)
 	return http.ListenAndServe(":"+port, nil)
 }
